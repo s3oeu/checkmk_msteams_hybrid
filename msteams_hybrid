@@ -414,7 +414,8 @@ def main():
     for ctx in contexts:
         host  = get_shortname(ctx.get("HOSTNAME","unknown"))
         state = get_state(ctx)
-        logger.info(f"DEBUG: Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
+        # DEBUG:
+        # logger.info(f"DEBUG: Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
 
         # Always-Notify
         if host in always_hosts:
