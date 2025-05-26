@@ -84,7 +84,7 @@
   <h3>Was muss ich tun, wenn gar nichts mehr geht?</h3>
   <p>Im Zweifel alle Caches löschen und Benachrichtigungsskript/CheckMK-Dienste neu starten. Logs prüfen!</p>
   <h2>Mitwirkende & Lizenz</h2>
-  <p>Entwickelt von <b>Nils ((<a href="https://s3o.eu/">s3o.eu</a>)</b>.<br>
+  <p>Entwickelt von <b>Nils (<a href="https://s3o.eu/">s3o.eu</a>)</b>.<br>
   <b>Lizenz:</b> MIT License – Nutzung und Anpassung ausdrücklich erlaubt!</p>
 
    <h2>Teams</h2>
