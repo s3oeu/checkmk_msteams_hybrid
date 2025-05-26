@@ -42,7 +42,6 @@
     <tr><td><code>8</code></td><td>Ignorierte Hosts am Wochenende (Komma-getrennt, z.B. <code>AVD01,AVD02</code>)</td></tr>
     <tr><td><code>9</code></td><td>Immer benachrichtigen (Komma-getrennt, z.B. <code>FW-GATE,SQL01</code>)</td></tr>
   </table>
-  $1
     <li>Tagsüber werden Alarme sofort an Teams gesendet.</li>
     <li>Nachts (bzw. außerhalb der erlaubten Zeiträume) werden Probleme nur <b>gecached</b>.</li>
     <li>Ein manueller oder automatischer Flush (z.B. über CheckMK) sendet alle gespeicherten Probleme am Morgen.</li>
@@ -124,7 +123,6 @@
     <tr><td><code>8</code></td><td>Ignored hosts on weekends (comma-separated, e.g. <code>AVD01,AVD02</code>)</td></tr>
     <tr><td><code>9</code></td><td>Always notify (comma-separated, e.g. <code>FW-GATE,SQL01</code>)</td></tr>
   </table>
-  $1
     <li>Alerts are instantly sent to Teams during the day.</li>
     <li>At night (or outside allowed periods) problems are only <b>cached</b>.</li>
     <li>A manual or automatic flush (e.g. via CheckMK) sends all cached problems in the morning.</li>
