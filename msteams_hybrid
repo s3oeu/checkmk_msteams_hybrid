@@ -325,7 +325,7 @@ def build_facts(ctx):
           {"name":"Server:\u2003\u2003","value":host},
           {"name":"Status:\u2003\u2002\u2002","value":line},
         ]
-    facts.append({"name":"Time:\u2009\u2009","value":when})
+    facts.append({"name":"Time:\u2003\u2003\u2002","value":when})
     if ctx.get("NOTIFICATIONCOMMENT"):
         facts.extend([
           {"name":"-------------","value":"-------------"},
