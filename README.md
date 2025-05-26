@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
 </head>
 <body>
+  
   <p>
     <b>Sprache/Language:</b>
     <a href="#deutsch">Deutsch</a> |
@@ -87,6 +88,10 @@
   <p>Entwickelt von <b>Nils ((<a href="https://s3o.eu/">s3o.eu</a>)</b>.<br>
   <b>Lizenz:</b> MIT License – Nutzung und Anpassung ausdrücklich erlaubt!</p>
 
+   <h2>Teams</h2>
+    <!-- Screenshots -->
+    <img src="https://dev.s3o.eu/dwn/github/msteams_hybrid/ok.png" alt="OK" />
+    <img src="https://dev.s3o.eu/dwn/github/msteams_hybrid/warn.png" alt="Warning" />
   <hr>
 
   <!-- Englisch -->
@@ -164,5 +169,12 @@
   <h2>Contributors & License</h2>
   <p>Developed by <b>Nils (<a href="https://s3o.eu/">s3o.eu</a>)</b>.<br>
   <b>License:</b> MIT License – use and modify freely!</p>
+
+  <h2>Teams</h2>
+    <!-- Screenshots -->
+    <img src="https://dev.s3o.eu/dwn/github/msteams_hybrid/ok.png" alt="OK" />
+    <img src="https://dev.s3o.eu/dwn/github/msteams_hybrid/warn.png" alt="Warning" />
+
+
 </body>
 </html>
