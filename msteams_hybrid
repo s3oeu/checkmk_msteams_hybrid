@@ -263,7 +263,8 @@ def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
         path = os.path.join(cache_dir, fn)
         ctx  = json.load(open(path))
         host = get_shortname(fn[:-5].split("__",1)[0])
-        logger.info(f"DEBUG(Flush): Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
+        # DEBUG:
+        # logger.info(f"DEBUG(Flush): Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
         if host in always_hosts:
             logger.info(f"🔥 Always-Notify (Flush): {host}")
             send_notification(ctx)
