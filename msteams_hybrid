@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Microsoft Teams - Hybrid Notification Script for CheckMK
+# Microsoft Teams - Hybrid
 # --------------- 
 # Day: immediate notification, Night: cache only, manual flush possible
 #
@@ -15,6 +15,8 @@
 # Parameter7:  Weekend end      (HH:MM or hour)
 # Parameter8:  Hosts to ignore on weekends (comma separated hostnames)
 # Parameter9:  Hosts to ALWAYS notify (comma separated hostnames)
+# Parameter10: Warn threshold (days/flushes, default 3)
+# Parameter11: Critical threshold (days/flushes, default 5)
 #
 # Bulk: yes
 
@@ -26,6 +28,9 @@ import requests
 import re
 from datetime import datetime, timedelta, time
 
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 def get_shortname(hostname):
     """Returns the part before the first dot in uppercase."""
     return hostname.split('.')[0].upper()
@@ -40,10 +45,9 @@ DEFAULT_NIGHT_FROM    = time(22, 0)
 DEFAULT_NIGHT_TO      = time(7,  0)
 DEFAULT_WEEKEND_FROM  = time(10, 0)
 DEFAULT_WEEKEND_TO    = time(20, 0)
+DEFAULT_WARN_THRES    = 3
+DEFAULT_CRIT_THRES    = 5
 
-# ---------------------------------------------------------------------
-# Status colors & icons
-# ---------------------------------------------------------------------
 COLORS = {
     "CRITICAL": "#EE0000", "DOWN":       "#EE0000",
     "WARNING":  "#FFDD00",
@@ -57,9 +61,6 @@ ICONS = {
     "UNKNOWN":  "🟧","UNREACHABLE":"🟧",
 }
 
-# ---------------------------------------------------------------------
-# Logging setup (console + file), both with timestamp
-# ---------------------------------------------------------------------
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 
 def setup_console_logging():
@@ -82,7 +83,7 @@ setup_console_logging()
 logger = logging.getLogger()
 
 # ---------------------------------------------------------------------
-# Time parsing (PARAM_4–7)
+# Time parsing
 # ---------------------------------------------------------------------
 def parse_time(val, fallback):
     if not val:
@@ -120,7 +121,7 @@ def adjust_time(ctx, state):
     return ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------------------------------------------------
-# Cache filename (host and service)
+# Cache filename
 # ---------------------------------------------------------------------
 def make_cache_filename(ctx):
     host = ctx.get("HOSTNAME","unknown")
@@ -131,15 +132,15 @@ def make_cache_filename(ctx):
         return f"{safe_host}__{safe_svc}.json"
     return f"{safe_host}.json"
 
+def ensure_cache_dir(cd):
+    os.makedirs(cd, exist_ok=True)
+
 def cache_path(ctx, cache_dir):
     ensure_cache_dir(cache_dir)
     return os.path.join(cache_dir, make_cache_filename(ctx))
 
-def ensure_cache_dir(cd):
-    os.makedirs(cd, exist_ok=True)
-
 # ---------------------------------------------------------------------
-# Night start calculation
+# Night start
 # ---------------------------------------------------------------------
 def get_night_start(now, night_from, night_to):
     if night_from <= night_to:
@@ -149,12 +150,15 @@ def get_night_start(now, night_from, night_to):
     return datetime.combine(now.date() - timedelta(days=1), night_from)
 
 # ---------------------------------------------------------------------
-# Caching logic with OK marker only at night
+# Caching logic
 # ---------------------------------------------------------------------
 def save_context_to_cache(ctx, cd):
-    # Save ignore and always hosts in the context (if set)
+    # Persist ignore and always values
     ctx['PARAMETER_8'] = ctx.get('PARAMETER_8', os.environ.get("NOTIFY_PARAMETER_8", ""))
     ctx['PARAMETER_9'] = ctx.get('PARAMETER_9', os.environ.get("NOTIFY_PARAMETER_9", ""))
+    # Initialize counter if absent
+    if 'DAYS_FLUSHED' not in ctx:
+        ctx['DAYS_FLUSHED'] = 0
     p = cache_path(ctx, cd)
     with open(p, "w") as f:
         json.dump(ctx, f)
@@ -167,13 +171,20 @@ def delete_cache_if_ok(ctx, cd, night_from, is_night):
             old = json.load(open(p))
         except:
             old = {}
-
-        cached_at_night = old.get("CACHED_DURING_NIGHT")
-        if cached_at_night is not None and cached_at_night:
-            logger.info(f"ℹ️ No OK-marker set (problem was originally cached during NIGHT/quiet hours): {p}")
+        # If already flushed, still send OK marker
+        if old.get("FLUSHED", False):
+            ok_fn = "ok_" + make_cache_filename(ctx)
+            with open(os.path.join(cd, ok_fn), "w") as f:
+                json.dump(ctx, f)
+            logger.info(f"💾 OK-marker (after flush) set: {ok_fn}")
             os.remove(p)
             return
-
+        # If cached during night and still OK, remove silently
+        if old.get("CACHED_DURING_NIGHT", False):
+            logger.info(f"ℹ️ Night OK: cache removed {p}")
+            os.remove(p)
+            return
+        # If in night and old event older than night start, mark OK
         if is_night:
             night_start = get_night_start(datetime.now(), night_from, DEFAULT_NIGHT_TO)
             dt_old = None
@@ -186,96 +197,83 @@ def delete_cache_if_ok(ctx, cd, night_from, is_night):
                 ok_fn = "ok_" + make_cache_filename(ctx)
                 with open(os.path.join(cd, ok_fn), "w") as f:
                     json.dump(ctx, f)
-                logger.info(f"💾 OK-marker set: {ok_fn}")
+                logger.info(f"💾 OK-marker set (night) {ok_fn}")
         else:
-            logger.info(f"🧹 Day mode: Cache deleted: {p}")
+            logger.info(f"🧹 Day OK: cache removed {p}")
         os.remove(p)
 
-
 # ---------------------------------------------------------------------
-# Flush: delete OK marker + only send problem caches,
-#        Ignored hosts & Always-notify are checked centrally
+# Message builder
 # ---------------------------------------------------------------------
-def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
-    ensure_cache_dir(cache_dir)
-    now = datetime.now()
-    is_weekend = now.weekday() >= 5
-    files      = [f for f in os.listdir(cache_dir) if f.endswith('.json')]
-    ok_files   = [f for f in files if f.startswith('ok_')]
-    prob_files = [f for f in files if not f.startswith('ok_')]
-
-    # ENV takes precedence! If not set, use union of all cached ignore/always-hosts
-    env_ignore = os.environ.get("NOTIFY_PARAMETER_8", "")
-    env_always = os.environ.get("NOTIFY_PARAMETER_9", "")
-    if env_ignore.strip():
-        ignore_hosts = [get_shortname(h.strip()) for h in env_ignore.split(",") if h.strip()]
+def build_facts(ctx):
+    t     = get_type(ctx)
+    state = get_state(ctx)
+    prev  = ctx.get(f"PREVIOUS{t}HARDSTATE") or ctx.get(f"LAST{t}STATE")
+    host  = ctx.get("HOSTALIAS", ctx.get("HOSTNAME","UNKNOWN"))
+    when  = adjust_time(ctx, state)
+    line  = (f"{get_colored_status(prev)} ➜ {get_colored_status(state)}" if prev else get_colored_status(state))
+    facts = []
+    # Determine thresholds
+    days = int(ctx.get("DAYS_FLUSHED", 0))
+    warn_thr = int(ctx.get("PARAMETER_10", DEFAULT_WARN_THRES))
+    crit_thr = int(ctx.get("PARAMETER_11", DEFAULT_CRIT_THRES))
+    # Append warning/critical
+    if crit_thr > 0 and days >= crit_thr:
+        facts.append({"name": f"❗️ KRITISCH ({days} Tage) ❗️", "value": ""})
+        logger.info(f"🔴 Critical threshold reached: {days} flushes")
+    elif warn_thr > 0 and days >= warn_thr:
+        facts.append({"name": f"⚠️ WARNUNG ({days} Tage) ⚠️", "value": ""})
+        logger.info(f"🟡 Warning threshold reached: {days} flushes")
+    # Standard facts
+    if t == "SERVICE":
+        facts += [
+          {"name": "Check:\u2003\u2003", "value": ctx.get("SERVICEDESC", "Unknown")},
+          {"name": "Status:\u2003\u2002\u2002", "value": line},
+        ]
     else:
-        ignore_hosts_set = set()
-        for fn in files:
-            try:
-                with open(os.path.join(cache_dir, fn)) as f:
-                    ctx = json.load(f)
-            except Exception:
-                continue
-            for h in ctx.get("PARAMETER_8","").split(","):
-                if h.strip():
-                    ignore_hosts_set.add(get_shortname(h.strip()))
-        ignore_hosts = list(ignore_hosts_set)
+        facts += [
+          {"name": "Server:\u2003\u2003", "value": host},
+          {"name": "Status:\u2003\u2002\u2002", "value": line},
+        ]
+    facts.append({"name": "Time:\u2003\u2003\u2002", "value": when})
+    if ctx.get("NOTIFICATIONCOMMENT"):
+        facts.extend([
+          {"name": "-------------", "value": "-------------"},
+          {"name": "Comment:\u2003", "value": ctx["NOTIFICATIONCOMMENT"]},
+        ])
+    if state not in ("OK","UP"):
+        facts.extend([
+          {"name": "-------------", "value": "-------------"},
+          {"name": "Details:\u2003\u2002\u2009", "value": ctx.get(f"{t}OUTPUT", "No further info.")},
+        ])
+    return facts
 
-    if env_always.strip():
-        always_hosts = [get_shortname(h.strip()) for h in env_always.split(",") if h.strip()]
-    else:
-        always_hosts_set = set()
-        for fn in files:
-            try:
-                with open(os.path.join(cache_dir, fn)) as f:
-                    ctx = json.load(f)
-            except Exception:
-                continue
-            for h in ctx.get("PARAMETER_9","").split(","):
-                if h.strip():
-                    always_hosts_set.add(get_shortname(h.strip()))
-        always_hosts = list(always_hosts_set)
+def single_card(ctx):
+    state   = get_state(ctx)
+    color   = COLORS.get(state, "#CCCCCC")
+    host    = ctx.get("HOSTALIAS", ctx.get("HOSTNAME", "UNKNOWN"))
+    summary = (f"{host} – {ctx.get('SERVICEDESC','')} – {state}" if get_type(ctx) == "SERVICE" else f"{host} – {state}")
+    return {
+      "@type": "MessageCard", "@context": "https://schema.org/extensions",
+      "summary": summary, "themeColor": color,
+      "sections": [{"activityTitle": host,
+                     "activitySubtitle": f"{get_type(ctx).capitalize()} Notification",
+                     "activityImage": "https://ticket.protones.de/images/pt-checkmk-teams.png",
+                     "facts": build_facts(ctx)}]
+    }
 
-    if not ok_files and not prob_files:
-        logger.info("ℹ️ No cached alarms to flush")
-        sys.exit(0)
-
-    # Send and delete OK marker
-    for fn in ok_files:
-        path = os.path.join(cache_dir, fn)
-        ctx  = json.load(open(path))
-        host = get_shortname(fn[3:-5].split("__",1)[0])
-        logger.info(f"DEBUG(Flush): Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
-        if host in always_hosts:
-            logger.info(f"🔥 Always-Notify (Flush): {host}")
-            send_notification(ctx)
-            logger.info(f"✅ OK-Flush (Always): {fn}")
-        elif is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Flush-ignore OK for {host} (weekend)")
-        else:
-            send_notification(ctx)
-            logger.info(f"✅ OK-Flush: {fn}")
-        os.remove(path)
-
-    # Send problem caches, do NOT delete
-    for fn in prob_files:
-        path = os.path.join(cache_dir, fn)
-        ctx  = json.load(open(path))
-        host = get_shortname(fn[:-5].split("__",1)[0])
-        # DEBUG:
-        # logger.info(f"DEBUG(Flush): Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
-        if host in always_hosts:
-            logger.info(f"🔥 Always-Notify (Flush): {host}")
-            send_notification(ctx)
-            logger.info(f"✅ Problem-Flush (Always): {fn}")
-        elif is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Flush-ignore problem for {host} (weekend)")
-        else:
-            send_notification(ctx)
-            logger.info(f"✅ Problem-Flush: {fn}")
-
-    sys.exit(0)
+def send_notification(ctx):
+    url = ctx.get("PARAMETER_1") or DEFAULT_WEBHOOK
+    if not url:
+        logger.error("❌ PARAMETER_1 (Webhook) missing")
+        return
+    card = single_card(ctx)
+    try:
+        r = requests.post(url,json=card,timeout=10)
+        r.raise_for_status()
+        logger.info(f"✅ sent: {ctx.get('HOSTNAME')} / {ctx.get('SERVICEDESC','')}")
+    except Exception as e:
+        logger.error(f"❌ Sending failed: {e}")
 
 # ---------------------------------------------------------------------
 # Context parsing
@@ -297,89 +295,108 @@ def contexts_from_stdin():
     gv,*ev = _decode_blocks(raw)
     return [
       {**{k[7:]:v for k,v in gv.items() if k.startswith("NOTIFY_")},
-       **{k[7:]:v for k,v in e.items()  if k.startswith("NOTIFY_")}}
-      for e in ev
+       **{k[7:]:v for k,v in e.items()  if k.startswith("NOTIFY_")}} for e in ev
     ]
 
 def context_from_env():
     return [{k[7:]:v for k,v in os.environ.items() if k.startswith("NOTIFY_") }]
 
 # ---------------------------------------------------------------------
-# Teams message builder
+# Flush logic
 # ---------------------------------------------------------------------
-def build_facts(ctx):
-    t     = get_type(ctx)
-    state = get_state(ctx)
-    prev  = ctx.get(f"PREVIOUS{t}HARDSTATE") or ctx.get(f"LAST{t}STATE")
-    host  = ctx.get("HOSTALIAS", ctx.get("HOSTNAME","UNKNOWN"))
-    when  = adjust_time(ctx, state)
-    line  = (f"{get_colored_status(prev)} ➜ {get_colored_status(state)}"
-             if prev else get_colored_status(state))
-    facts=[]
-    if t=="SERVICE":
-        facts += [
-          {"name":"Check:\u2003\u2003","value":ctx.get("SERVICEDESC","Unknown")},
-          {"name":"Status:\u2003\u2002\u2002","value":line},
-        ]
+def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
+    ensure_cache_dir(cache_dir)
+    now = datetime.now()
+    is_weekend = now.weekday() >= 5
+    files      = [f for f in os.listdir(cache_dir) if f.endswith('.json')]
+    ok_files   = [f for f in files if f.startswith('ok_')]
+    prob_files = [f for f in files if not f.startswith('ok_')]
+
+    env_ignore = os.environ.get("NOTIFY_PARAMETER_8", "")
+    env_always = os.environ.get("NOTIFY_PARAMETER_9", "")
+    if env_ignore.strip():
+        ignore_hosts = [get_shortname(h.strip()) for h in env_ignore.split(",") if h.strip()]
     else:
-        facts += [
-          {"name":"Server:\u2003\u2003","value":host},
-          {"name":"Status:\u2003\u2002\u2002","value":line},
-        ]
-    facts.append({"name":"Time:\u2003\u2003\u2002","value":when})
-    if ctx.get("NOTIFICATIONCOMMENT"):
-        facts.extend([
-          {"name":"-------------","value":"-------------"},
-          {"name":"Comment:\u2003","value":ctx["NOTIFICATIONCOMMENT"]},
-        ])
-    if state not in ("OK","UP"):
-        facts.extend([
-          {"name":"-------------","value":"-------------"},
-          {"name":"Details:\u2003\u2002\u2009","value":ctx.get(f"{t}OUTPUT","No further info.")},
-        ])
-    return facts
+        ignore_hosts_set = set()
+        for fn in files:
+            try:
+                with open(os.path.join(cache_dir, fn)) as f:
+                    ctx = json.load(f)
+            except:
+                continue
+            for h in ctx.get("PARAMETER_8","" ).split(","):
+                if h.strip(): ignore_hosts_set.add(get_shortname(h.strip()))
+        ignore_hosts = list(ignore_hosts_set)
 
-def single_card(ctx):
-    state   = get_state(ctx)
-    color   = COLORS.get(state,"#CCCCCC")
-    host    = ctx.get("HOSTALIAS", ctx.get("HOSTNAME","UNKNOWN"))
-    summary = (f"{host} – {ctx.get('SERVICEDESC','')} – {state}"
-               if get_type(ctx)=="SERVICE" else f"{host} – {state}")
-    return {
-      "@type":"MessageCard","@context":"https://schema.org/extensions",
-      "summary":summary,"themeColor":color,
-      "sections":[{"activityTitle":host,
-                   "activitySubtitle":f"{get_type(ctx).capitalize()} Notification",
-                   "activityImage":"https://ticket.protones.de/images/pt-checkmk-teams.png",
-                   "facts":build_facts(ctx)}]
-    }
+    if env_always.strip():
+        always_hosts = [get_shortname(h.strip()) for h in env_always.split(",") if h.strip()]
+    else:
+        always_hosts_set = set()
+        for fn in files:
+            try:
+                with open(os.path.join(cache_dir, fn)) as f:
+                    ctx = json.load(f)
+            except:
+                continue
+            for h in ctx.get("PARAMETER_9","" ).split(","):
+                if h.strip(): always_hosts_set.add(get_shortname(h.strip()))
+        always_hosts = list(always_hosts_set)
 
-def send_notification(ctx):
-    url = ctx.get("PARAMETER_1") or DEFAULT_WEBHOOK
-    if not url:
-        logger.error("❌ PARAMETER_1 (Webhook) missing")
-        return
-    card = single_card(ctx)
-    try:
-        r = requests.post(url,json=card,timeout=10)
-        r.raise_for_status()
-        logger.info(f"✅ sent: {ctx.get('HOSTNAME')} / {ctx.get('SERVICEDESC','')}")
-    except Exception as e:
-        logger.error(f"❌ Sending failed: {e}")
+    if not ok_files and not prob_files:
+        logger.info("ℹ️ No cached alarms to flush")
+        sys.exit(0)
+
+    # Handle OK markers first
+    for fn in ok_files:
+        path = os.path.join(cache_dir, fn)
+        ctx  = json.load(open(path))
+        host = get_shortname(fn[3:-5].split("__",1)[0])
+        if host in always_hosts:
+            logger.info(f"🔥 Always-Notify OK (Flush): {host}")
+            send_notification(ctx)
+            logger.info(f"✅ OK-Flush (always): {fn}")
+        elif is_weekend and host in ignore_hosts:
+            logger.info(f"🚫 Weekend OK ignore: {host}")
+        else:
+            send_notification(ctx)
+            logger.info(f"✅ OK-Flush: {fn}")
+        os.remove(path)
+
+    # Handle problem caches
+    for fn in prob_files:
+        path = os.path.join(cache_dir, fn)
+        ctx  = json.load(open(path))
+        host = get_shortname(fn[:-5].split("__",1)[0])
+        # increment counter
+        days = int(ctx.get("DAYS_FLUSHED", 0)) + 1
+        ctx['DAYS_FLUSHED'] = days
+        ctx['FLUSHED'] = True
+        with open(path, 'w') as f:
+            json.dump(ctx, f)
+        if host in always_hosts:
+            logger.info(f"🔥 Always-Notify Problem (Flush): {host}, count={days}")
+            send_notification(ctx)
+            logger.info(f"✅ Problem-Flush (always): {fn}")
+        elif is_weekend and host in ignore_hosts:
+            logger.info(f"🚫 Weekend Problem ignore: {host}, count={days}")
+        else:
+            logger.info(f"ℹ️ Problem-Flush: {host}, flush count={days}")
+            send_notification(ctx)
+            logger.info(f"✅ Problem-Flush sent: {fn}")
+
+    sys.exit(0)
 
 # ---------------------------------------------------------------------
-# Main
+# Main entry
 # ---------------------------------------------------------------------
 def main():
     global logger
-
-    # Manual flush before stdin
+    # Manual flush path
     if len(sys.argv)>1 and sys.argv[1]=="--flush":
         cfg = context_from_env()[0]
         cache_dir  = cfg.get("PARAMETER_2", DEFAULT_CACHE_DIR)
         log_file   = cfg.get("PARAMETER_3", DEFAULT_LOG_FILE)
         night_from = parse_time(cfg.get("PARAMETER_4",""), DEFAULT_NIGHT_FROM)
-        # Read ignore hosts & always-notify hosts centrally
         ignore_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_8","" ).split(",") if h.strip()]
         always_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_9","" ).split(",") if h.strip()]
         setup_file_logging(log_file)
@@ -390,7 +407,6 @@ def main():
     if not contexts:
         logger.error("❌ No notification data received")
         sys.exit(2)
-
     cfg           = contexts[0]
     cache_dir     = cfg.get("PARAMETER_2", DEFAULT_CACHE_DIR)
     log_file      = cfg.get("PARAMETER_3", DEFAULT_LOG_FILE)
@@ -400,6 +416,11 @@ def main():
     weekend_to    = parse_time(cfg.get("PARAMETER_7",""), DEFAULT_WEEKEND_TO)
     ignore_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_8","" ).split(",") if h.strip()]
     always_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_9","" ).split(",") if h.strip()]
+    # Defaults for thresholds
+    if not cfg.get("PARAMETER_10"):
+        cfg['PARAMETER_10'] = str(DEFAULT_WARN_THRES)
+    if not cfg.get("PARAMETER_11"):
+        cfg['PARAMETER_11'] = str(DEFAULT_CRIT_THRES)
 
     setup_file_logging(log_file)
     logger = logging.getLogger()
@@ -415,42 +436,35 @@ def main():
     for ctx in contexts:
         host  = get_shortname(ctx.get("HOSTNAME","unknown"))
         state = get_state(ctx)
-        # DEBUG:
-        # logger.info(f"DEBUG: Host={host} | Ignore list={ignore_hosts} | is_weekend={is_weekend}")
-
         # Always-Notify
         if host in always_hosts:
             logger.info(f"🔥 Always-Notify: {host}/{ctx.get('SERVICEDESC','')}")
             send_notification(ctx)
             delete_cache_if_ok(ctx, cache_dir, night_from, False)
             continue
-
-        # Weekend-ignore: notify not sent, but still cache
+        # Weekend-ignore
         if is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Weekend-ignore: {host} (will still be cached)")
-            if state not in ("OK", "UP"):
+            logger.info(f"🚫 Weekend-ignore: {host} (cached)")
+            if state not in ("OK","UP"):
                 ctx['CACHED_DURING_NIGHT'] = True
                 save_context_to_cache(ctx, cache_dir)
             else:
                 delete_cache_if_ok(ctx, cache_dir, night_from, True)
             continue
-
         allowed  = we_ok if is_weekend else day_ok
         is_night = not allowed
-
         if allowed:
             send_notification(ctx)
             delete_cache_if_ok(ctx, cache_dir, night_from, False)
-            if state not in ("OK", "UP"):
+            if state not in ("OK","UP"):
                 ctx['CACHED_DURING_NIGHT'] = False
                 save_context_to_cache(ctx, cache_dir)
         else:
-            if state not in ("OK", "UP"):
+            if state not in ("OK","UP"):
                 ctx['CACHED_DURING_NIGHT'] = True
                 save_context_to_cache(ctx, cache_dir)
             else:
                 delete_cache_if_ok(ctx, cache_dir, night_from, True)
-
     sys.exit(0)
 
 if __name__ == "__main__":
