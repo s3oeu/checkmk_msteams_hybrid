@@ -17,6 +17,7 @@
 # Parameter9:  Hosts to ALWAYS notify (comma separated hostnames)
 # Parameter10: Warn threshold (days/flushes, default 3)
 # Parameter11: Critical threshold (days/flushes, default 5)
+# Parameter12: Log retention period in days (default 180)
 #
 # Bulk: yes
 
@@ -79,6 +80,27 @@ def setup_file_logging(log_file):
     fh.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.getLogger().addHandler(fh)
 
+def cleanup_log_file(log_file, days_to_keep):
+    if not os.path.exists(log_file):
+        return
+    cutoff = datetime.now() - timedelta(days=days_to_keep)
+    log_lines = []
+    date_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
+    with open(log_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            m = date_pattern.match(line)
+            if m:
+                try:
+                    log_time = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    if log_time >= cutoff:
+                        log_lines.append(line)
+                except Exception:
+                    log_lines.append(line)
+            else:
+                log_lines.append(line)
+    with open(log_file, 'w', encoding='utf-8') as f:
+        f.writelines(log_lines)
+
 setup_console_logging()
 logger = logging.getLogger()
 
@@ -112,12 +134,6 @@ def get_colored_status(state):
 
 def adjust_time(ctx, state):
     ts = ctx.get("SHORTDATETIME")
-    if ts and state in ("WARNING","CRITICAL"):
-        try:
-            d = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") - timedelta(minutes=5)
-            return d.strftime("%Y-%m-%d %H:%M:%S")
-        except:
-            pass
     return ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------------------------------------------------------------------
@@ -159,6 +175,9 @@ def save_context_to_cache(ctx, cd):
     # Initialize counter if absent
     if 'DAYS_FLUSHED' not in ctx:
         ctx['DAYS_FLUSHED'] = 0
+    # Store the timestamp when the problem started
+    if 'PROBLEM_SINCE' not in ctx and get_state(ctx) not in ("OK", "UP"):
+        ctx['PROBLEM_SINCE'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     p = cache_path(ctx, cd)
     with open(p, "w") as f:
         json.dump(ctx, f)
@@ -171,35 +190,16 @@ def delete_cache_if_ok(ctx, cd, night_from, is_night):
             old = json.load(open(p))
         except:
             old = {}
-        # If already flushed, still send OK marker
-        if old.get("FLUSHED", False):
+        # Set OK-marker only if problem was NOT cached during night/weekend AND we are now in night/weekend
+        if not old.get("CACHED_DURING_NIGHT", False) and is_night:
             ok_fn = "ok_" + make_cache_filename(ctx)
             with open(os.path.join(cd, ok_fn), "w") as f:
                 json.dump(ctx, f)
-            logger.info(f"💾 OK-marker (after flush) set: {ok_fn}")
+            logger.info(f"💾 OK-marker set (problem outside, resolved inside night/weekend): {ok_fn}")
             os.remove(p)
             return
-        # If cached during night and still OK, remove silently
-        if old.get("CACHED_DURING_NIGHT", False):
-            logger.info(f"ℹ️ Night OK: cache removed {p}")
-            os.remove(p)
-            return
-        # If in night and old event older than night start, mark OK
-        if is_night:
-            night_start = get_night_start(datetime.now(), night_from, DEFAULT_NIGHT_TO)
-            dt_old = None
-            if old.get("SHORTDATETIME"):
-                try:
-                    dt_old = datetime.strptime(old["SHORTDATETIME"], "%Y-%m-%d %H:%M:%S")
-                except:
-                    pass
-            if dt_old and dt_old < night_start:
-                ok_fn = "ok_" + make_cache_filename(ctx)
-                with open(os.path.join(cd, ok_fn), "w") as f:
-                    json.dump(ctx, f)
-                logger.info(f"💾 OK-marker set (night) {ok_fn}")
-        else:
-            logger.info(f"🧹 Day OK: cache removed {p}")
+        # In all other cases, just remove the cache
+        logger.info(f"🧹 OK: cache removed {p}")
         os.remove(p)
 
 # ---------------------------------------------------------------------
@@ -213,16 +213,19 @@ def build_facts(ctx):
     when  = adjust_time(ctx, state)
     line  = (f"{get_colored_status(prev)} ➜ {get_colored_status(state)}" if prev else get_colored_status(state))
     facts = []
-    # Determine thresholds
-    days = int(ctx.get("DAYS_FLUSHED", 0))
+    # thresholds
+    days     = int(ctx.get("DAYS_FLUSHED", 0))
     warn_thr = int(ctx.get("PARAMETER_10", DEFAULT_WARN_THRES))
     crit_thr = int(ctx.get("PARAMETER_11", DEFAULT_CRIT_THRES))
-    # Append warning/critical
     if crit_thr > 0 and days >= crit_thr:
-        facts.append({"name": f"❗️ KRITISCH ({days} Tage) ❗️", "value": ""})
+        # critical header, larger emphasis via bold
+        facts.append({"name": f"\u2003❗️ CRITICAL (since {days} Days) ❗️", "value": ""})
+        facts.append({"name": "", "value": ""})  # blank line for separation
         logger.info(f"🔴 Critical threshold reached: {days} flushes")
     elif warn_thr > 0 and days >= warn_thr:
-        facts.append({"name": f"⚠️ WARNUNG ({days} Tage) ⚠️", "value": ""})
+        # warning header, larger emphasis via bold
+        facts.append({"name": f"\u2003⚠️ WARNING (since {days} Days) ⚠️", "value": ""})
+        facts.append({"name": "", "value": ""})  # blank line for separation
         logger.info(f"🟡 Warning threshold reached: {days} flushes")
     # Standard facts
     if t == "SERVICE":
@@ -236,6 +239,31 @@ def build_facts(ctx):
           {"name": "Status:\u2003\u2002\u2002", "value": line},
         ]
     facts.append({"name": "Time:\u2003\u2003\u2002", "value": when})
+
+    # Show problem duration on OK/UP
+    if state in ("OK", "UP") and ctx.get("PROBLEM_SINCE"):
+        try:
+            problem_since = datetime.strptime(ctx["PROBLEM_SINCE"], "%Y-%m-%d %H:%M:%S")
+            now = datetime.strptime(ctx.get("SHORTDATETIME"), "%Y-%m-%d %H:%M:%S") if ctx.get("SHORTDATETIME") else datetime.now()
+            delta = now - problem_since
+            total_seconds = int(delta.total_seconds())
+            days, rem = divmod(total_seconds, 86400)
+            hours, rem = divmod(rem, 3600)
+            minutes, seconds = divmod(rem, 60)
+            duration_parts = []
+            if days > 0:
+                duration_parts.append(f"{days}d")
+            if hours > 0 or days > 0:
+                duration_parts.append(f"{hours}h")
+            if minutes > 0 or hours > 0 or days > 0:
+                duration_parts.append(f"{minutes}m")
+            if seconds > 0 or (days == 0 and hours == 0 and minutes == 0):
+                duration_parts.append(f"{seconds}s")
+            duration_str = " ".join(duration_parts)
+            facts.append({"name": "Resolved after:", "value": duration_str})
+        except Exception:
+            pass
+
     if ctx.get("NOTIFICATIONCOMMENT"):
         facts.extend([
           {"name": "-------------", "value": "-------------"},
@@ -305,6 +333,10 @@ def context_from_env():
 # Flush logic
 # ---------------------------------------------------------------------
 def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
+    cfg = context_from_env()[0]
+    log_file = cfg.get("PARAMETER_3", DEFAULT_LOG_FILE)
+    days_to_keep = int(cfg.get("PARAMETER_12", 180))
+    cleanup_log_file(log_file, days_to_keep)
     ensure_cache_dir(cache_dir)
     now = datetime.now()
     is_weekend = now.weekday() >= 5
