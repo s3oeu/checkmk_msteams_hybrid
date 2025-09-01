@@ -48,6 +48,7 @@ DEFAULT_WEEKEND_FROM  = time(10, 0)
 DEFAULT_WEEKEND_TO    = time(20, 0)
 DEFAULT_WARN_THRES    = 3
 DEFAULT_CRIT_THRES    = 5
+DEFAULT_LOG_DAYS      = 180
 
 COLORS = {
     "CRITICAL": "#EE0000", "DOWN":       "#EE0000",
@@ -56,10 +57,10 @@ COLORS = {
     "UNKNOWN":  "#FFA500","UNREACHABLE":"#FFA500",
 }
 ICONS = {
-    "CRITICAL": "🟥", "DOWN":       "🟥",
-    "WARNING":  "🟨",
-    "OK":       "🟩", "UP":         "🟩",
-    "UNKNOWN":  "🟧","UNREACHABLE":"🟧",
+    "CRITICAL": "ðŸŸ¥", "DOWN":       "ðŸŸ¥",
+    "WARNING":  "ðŸŸ¨",
+    "OK":       "ðŸŸ©", "UP":         "ðŸŸ©",
+    "UNKNOWN":  "ðŸŸ§","UNREACHABLE":"ðŸŸ§",
 }
 
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
@@ -75,7 +76,7 @@ def setup_console_logging():
 
 def setup_file_logging(log_file):
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    fh = logging.FileHandler(log_file)
+    fh = logging.FileHandler(log_file, encoding='utf-8')  # <--- encoding hinzugefÃ¼gt
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(LOG_FORMAT))
     logging.getLogger().addHandler(fh)
@@ -86,6 +87,7 @@ def cleanup_log_file(log_file, days_to_keep):
     cutoff = datetime.now() - timedelta(days=days_to_keep)
     log_lines = []
     date_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
+    # Ã–ffnen mit utf-8 Encoding
     with open(log_file, 'r', encoding='utf-8') as f:
         for line in f:
             m = date_pattern.match(line)
@@ -98,6 +100,7 @@ def cleanup_log_file(log_file, days_to_keep):
                     log_lines.append(line)
             else:
                 log_lines.append(line)
+    # Schreiben mit utf-8 Encoding
     with open(log_file, 'w', encoding='utf-8') as f:
         f.writelines(log_lines)
 
@@ -116,7 +119,7 @@ def parse_time(val, fallback):
         pass
     if val.isdigit() and 0 <= int(val) < 24:
         return time(int(val), 0)
-    logger.warning(f"⚠️ Invalid time format '{val}', using {fallback}")
+    logger.warning(f"âš ï¸ Invalid time format '{val}', using {fallback}")
     return fallback
 
 # ---------------------------------------------------------------------
@@ -130,7 +133,7 @@ def get_state(ctx):
     return ctx.get(key, "UNKNOWN")
 
 def get_colored_status(state):
-    return f"{ICONS.get(state,'⬜')} {state}"
+    return f"{ICONS.get(state,'â¬œ')} {state}"
 
 def adjust_time(ctx, state):
     ts = ctx.get("SHORTDATETIME")
@@ -181,7 +184,7 @@ def save_context_to_cache(ctx, cd):
     p = cache_path(ctx, cd)
     with open(p, "w") as f:
         json.dump(ctx, f)
-    logger.info(f"💾 cached: {p}")
+    logger.info(f"ðŸ’¾ cached: {p}")
 
 def delete_cache_if_ok(ctx, cd, night_from, is_night):
     p = cache_path(ctx, cd)
@@ -195,11 +198,11 @@ def delete_cache_if_ok(ctx, cd, night_from, is_night):
             ok_fn = "ok_" + make_cache_filename(ctx)
             with open(os.path.join(cd, ok_fn), "w") as f:
                 json.dump(ctx, f)
-            logger.info(f"💾 OK-marker set (problem outside, resolved inside night/weekend): {ok_fn}")
+            logger.info(f"ðŸ’¾ OK-marker set (problem outside, resolved inside night/weekend): {ok_fn}")
             os.remove(p)
             return
         # In all other cases, just remove the cache
-        logger.info(f"🧹 OK: cache removed {p}")
+        logger.info(f"ðŸ§¹ OK: cache removed {p}")
         os.remove(p)
 
 # ---------------------------------------------------------------------
@@ -211,22 +214,21 @@ def build_facts(ctx):
     prev  = ctx.get(f"PREVIOUS{t}HARDSTATE") or ctx.get(f"LAST{t}STATE")
     host  = ctx.get("HOSTALIAS", ctx.get("HOSTNAME","UNKNOWN"))
     when  = adjust_time(ctx, state)
-    line  = (f"{get_colored_status(prev)} ➜ {get_colored_status(state)}" if prev else get_colored_status(state))
+    line  = (f"{get_colored_status(prev)} âžœ {get_colored_status(state)}" if prev else get_colored_status(state))
     facts = []
     # thresholds
     days     = int(ctx.get("DAYS_FLUSHED", 0))
     warn_thr = int(ctx.get("PARAMETER_10", DEFAULT_WARN_THRES))
     crit_thr = int(ctx.get("PARAMETER_11", DEFAULT_CRIT_THRES))
     if crit_thr > 0 and days >= crit_thr:
-        # critical header, larger emphasis via bold
-        facts.append({"name": f"\u2003❗️ CRITICAL (since {days} Days) ❗️", "value": ""})
-        facts.append({"name": "", "value": ""})  # blank line for separation
-        logger.info(f"🔴 Critical threshold reached: {days} flushes")
+        facts.append({"name": f"\u2003â—ï¸ CRITICAL (since {days} Days) â—ï¸", "value": ""})
+        facts.append({"name": "", "value": ""})
+        logger.info(f"ðŸ”´ Critical threshold reached: {days} flushes")
     elif warn_thr > 0 and days >= warn_thr:
-        # warning header, larger emphasis via bold
-        facts.append({"name": f"\u2003⚠️ WARNING (since {days} Days) ⚠️", "value": ""})
-        facts.append({"name": "", "value": ""})  # blank line for separation
-        logger.info(f"🟡 Warning threshold reached: {days} flushes")
+        facts.append({"name": f"\u2003âš ï¸ WARNING (since {days} Days) âš ï¸", "value": ""})
+        facts.append({"name": "", "value": ""})
+        logger.info(f"ðŸŸ¡ Warning threshold reached: {days} flushes")
+
     # Standard facts
     if t == "SERVICE":
         facts += [
@@ -239,6 +241,16 @@ def build_facts(ctx):
           {"name": "Status:\u2003\u2002\u2002", "value": line},
         ]
     facts.append({"name": "Time:\u2003\u2003\u2002", "value": when})
+
+    # --- Status-Historie Block ---
+    history = ctx.get('STATE_HISTORY', [])
+    if history and len(history) > 1:
+        hist_lines = []
+        for h in history:
+            hist_lines.append(f"{get_colored_status(h['state'])} ({h['time']})")
+        hist_str = "\n".join(hist_lines)
+        facts.append({"name": "State changes: ", "value": hist_str})
+    # --- Ende Status-Historie Block ---
 
     # Show problem duration on OK/UP
     if state in ("OK", "UP") and ctx.get("PROBLEM_SINCE"):
@@ -280,7 +292,7 @@ def single_card(ctx):
     state   = get_state(ctx)
     color   = COLORS.get(state, "#CCCCCC")
     host    = ctx.get("HOSTALIAS", ctx.get("HOSTNAME", "UNKNOWN"))
-    summary = (f"{host} – {ctx.get('SERVICEDESC','')} – {state}" if get_type(ctx) == "SERVICE" else f"{host} – {state}")
+    summary = (f"{host} â€“ {ctx.get('SERVICEDESC','')} â€“ {state}" if get_type(ctx) == "SERVICE" else f"{host} â€“ {state}")
     return {
       "@type": "MessageCard", "@context": "https://schema.org/extensions",
       "summary": summary, "themeColor": color,
@@ -293,15 +305,15 @@ def single_card(ctx):
 def send_notification(ctx):
     url = ctx.get("PARAMETER_1") or DEFAULT_WEBHOOK
     if not url:
-        logger.error("❌ PARAMETER_1 (Webhook) missing")
+        logger.error("âŒ PARAMETER_1 (Webhook) missing")
         return
     card = single_card(ctx)
     try:
         r = requests.post(url,json=card,timeout=10)
         r.raise_for_status()
-        logger.info(f"✅ sent: {ctx.get('HOSTNAME')} / {ctx.get('SERVICEDESC','')}")
+        logger.info(f"âœ… sent: {ctx.get('HOSTNAME')} / {ctx.get('SERVICEDESC','')}")
     except Exception as e:
-        logger.error(f"❌ Sending failed: {e}")
+        logger.error(f"âŒ Sending failed: {e}")
 
 # ---------------------------------------------------------------------
 # Context parsing
@@ -335,8 +347,9 @@ def context_from_env():
 def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
     cfg = context_from_env()[0]
     log_file = cfg.get("PARAMETER_3", DEFAULT_LOG_FILE)
-    days_to_keep = int(cfg.get("PARAMETER_12", 180))
+    days_to_keep = int(cfg.get("PARAMETER_12", DEFAULT_LOG_DAYS))
     cleanup_log_file(log_file, days_to_keep)
+    logger.info(f"DEBUG: PARAMETER_12 (Log retention days) = {cfg.get('PARAMETER_12')} (used: {days_to_keep})")
     ensure_cache_dir(cache_dir)
     now = datetime.now()
     is_weekend = now.weekday() >= 5
@@ -375,7 +388,7 @@ def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
         always_hosts = list(always_hosts_set)
 
     if not ok_files and not prob_files:
-        logger.info("ℹ️ No cached alarms to flush")
+        logger.info("â„¹ï¸ No cached alarms to flush")
         sys.exit(0)
 
     # Handle OK markers first
@@ -384,14 +397,14 @@ def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
         ctx  = json.load(open(path))
         host = get_shortname(fn[3:-5].split("__",1)[0])
         if host in always_hosts:
-            logger.info(f"🔥 Always-Notify OK (Flush): {host}")
+            logger.info(f"ðŸ”¥ Always-Notify OK (Flush): {host}")
             send_notification(ctx)
-            logger.info(f"✅ OK-Flush (always): {fn}")
+            logger.info(f"âœ… OK-Flush (always): {fn}")
         elif is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Weekend OK ignore: {host}")
+            logger.info(f"ðŸš« Weekend OK ignore: {host}")
         else:
             send_notification(ctx)
-            logger.info(f"✅ OK-Flush: {fn}")
+            logger.info(f"âœ… OK-Flush: {fn}")
         os.remove(path)
 
     # Handle problem caches
@@ -406,15 +419,15 @@ def flush_cache(cache_dir, night_from, ignore_hosts, always_hosts):
         with open(path, 'w') as f:
             json.dump(ctx, f)
         if host in always_hosts:
-            logger.info(f"🔥 Always-Notify Problem (Flush): {host}, count={days}")
+            logger.info(f"ðŸ”¥ Always-Notify Problem (Flush): {host}, count={days}")
             send_notification(ctx)
-            logger.info(f"✅ Problem-Flush (always): {fn}")
+            logger.info(f"âœ… Problem-Flush (always): {fn}")
         elif is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Weekend Problem ignore: {host}, count={days}")
+            logger.info(f"ðŸš« Weekend Problem ignore: {host}, count={days}")
         else:
-            logger.info(f"ℹ️ Problem-Flush: {host}, flush count={days}")
+            logger.info(f"â„¹ï¸ Problem-Flush: {host}, flush count={days}")
             send_notification(ctx)
-            logger.info(f"✅ Problem-Flush sent: {fn}")
+            logger.info(f"âœ… Problem-Flush sent: {fn}")
 
     sys.exit(0)
 
@@ -432,12 +445,12 @@ def main():
         ignore_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_8","" ).split(",") if h.strip()]
         always_hosts  = [get_shortname(h.strip()) for h in cfg.get("PARAMETER_9","" ).split(",") if h.strip()]
         setup_file_logging(log_file)
-        logger.info("⏰ Starting manual flush")
+        logger.info("â° Starting manual flush")
         flush_cache(cache_dir, night_from, ignore_hosts, always_hosts)
 
     contexts = contexts_from_stdin() or context_from_env()
     if not contexts:
-        logger.error("❌ No notification data received")
+        logger.error("âŒ No notification data received")
         sys.exit(2)
     cfg           = contexts[0]
     cache_dir     = cfg.get("PARAMETER_2", DEFAULT_CACHE_DIR)
@@ -470,13 +483,13 @@ def main():
         state = get_state(ctx)
         # Always-Notify
         if host in always_hosts:
-            logger.info(f"🔥 Always-Notify: {host}/{ctx.get('SERVICEDESC','')}")
+            logger.info(f"ðŸ”¥ Always-Notify: {host}/{ctx.get('SERVICEDESC','')}")
             send_notification(ctx)
             delete_cache_if_ok(ctx, cache_dir, night_from, False)
             continue
         # Weekend-ignore
         if is_weekend and host in ignore_hosts:
-            logger.info(f"🚫 Weekend-ignore: {host} (cached)")
+            logger.info(f"ðŸš« Weekend-ignore: {host} (cached)")
             if state not in ("OK","UP"):
                 ctx['CACHED_DURING_NIGHT'] = True
                 save_context_to_cache(ctx, cache_dir)
